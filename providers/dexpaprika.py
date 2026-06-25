@@ -6,6 +6,8 @@ import datetime
 from typing import Any, Dict, List, Optional
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from metrics.defi import Defi, DefiMetricType
 from providers.base import BaseProvider
@@ -23,10 +25,20 @@ class DexPaprika(BaseProvider):
     so ``fetch_rows`` returns a single row dated today when today falls within the
     requested range (consistent with the aggregator's other snapshot providers).
 
+    The session retries idempotent GETs with capped exponential backoff + jitter
+    and honors ``Retry-After`` on 429/5xx, because the DEX-count metric paginates
+    and the public API is rate-limited.
+
     No API key required (public REST API).
     """
 
     _CHAIN = "solana"
+    BASE_URL = "https://api.dexpaprika.com"
+
+    # (connect, read) timeouts; requests has no default and would otherwise hang.
+    _TIMEOUT = (5, 30)
+    _PAGE_LIMIT = 100
+    _MAX_PAGES = 50  # safety bound for DEX pagination
 
     METRIC_MAP: Dict[str, Dict[str, Any]] = {
         "defi_dex_volume": {
@@ -55,10 +67,6 @@ class DexPaprika(BaseProvider):
         "defi_dex_count": DefiMetricType.DEX_COUNT,
     }
 
-    BASE_URL = "https://api.dexpaprika.com"
-    _PAGE_LIMIT = 100
-    _MAX_PAGES = 50  # safety bound for DEX pagination
-
     def __init__(self) -> None:
         super().__init__(
             name="DexPaprika",
@@ -66,12 +74,24 @@ class DexPaprika(BaseProvider):
             api_key="",
         )
         self._session = requests.Session()
+        retry = Retry(
+            total=3,
+            backoff_factor=0.5,
+            backoff_jitter=0.5,
+            status_forcelist=(408, 429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"GET"}),
+            respect_retry_after_header=True,
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        self._session.mount("https://", adapter)
+        self._session.mount("http://", adapter)
 
     # -- private helpers ----------------------------------------------------
 
     def _get(self, endpoint: str, *, params: Optional[Dict[str, Any]] = None) -> Any:
         resp = self._session.get(
-            f"{self.base_url}{endpoint}", params=params or {}, timeout=30
+            f"{self.base_url}{endpoint}", params=params or {}, timeout=self._TIMEOUT
         )
         resp.raise_for_status()
         return resp.json()
