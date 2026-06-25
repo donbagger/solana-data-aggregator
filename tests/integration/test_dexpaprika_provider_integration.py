@@ -30,6 +30,22 @@ def test_get_dex_volume_live_api() -> None:
 
 
 @pytest.mark.integration
+def test_get_dex_transactions_live_api() -> None:
+    """Confirms the txns_24h response key exists and maps end-to-end."""
+    provider = DexPaprika()
+    metric = provider.get_metric(
+        metric="defi_dex_transactions",
+        date=_TODAY,
+        chain="solana",
+    )
+
+    assert metric is not None
+    assert isinstance(metric, Defi)
+    assert metric.metric_type == DefiMetricType.DEX_TRANSACTIONS
+    assert metric.value > 0
+
+
+@pytest.mark.integration
 def test_get_dex_count_live_api() -> None:
     """DEX count for Solana should be a positive whole number."""
     provider = DexPaprika()

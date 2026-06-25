@@ -41,22 +41,17 @@ def _make_mock_resp(payload):
 
 def test_get_dex_volume_returns_defi_metric() -> None:
     provider = DexPaprika()
-    sentinel_metric = object()
 
-    with (
-        patch.object(
-            provider._session, "get", return_value=_make_mock_resp(_NETWORKS_RAW)
-        ),
-        patch.object(
-            Defi, "from_metric_type", return_value=sentinel_metric
-        ) as mock_factory,
+    with patch.object(
+        provider._session, "get", return_value=_make_mock_resp(_NETWORKS_RAW)
     ):
         result = provider.get_metric("defi_dex_volume", _TODAY, "solana")
 
-    assert result is sentinel_metric
-    mock_factory.assert_called_once()
-    assert mock_factory.call_args.kwargs["metric_type"] == DefiMetricType.DEX_VOLUME
-    assert mock_factory.call_args.kwargs["value"] == 5_000_000_000.0
+    # Build a real model (no factory mock) so a swapped metadata mapping or a
+    # broken Defi/Overview branch would actually fail here.
+    assert isinstance(result, Defi)
+    assert result.metric_type == DefiMetricType.DEX_VOLUME
+    assert result.value == 5_000_000_000.0
 
 
 def test_fetch_rows_dex_transactions_picks_solana() -> None:
@@ -80,24 +75,76 @@ def test_fetch_rows_dex_count_counts_only_active() -> None:
     assert rows == [{"date": _TODAY, "value": 2.0}]
 
 
+def test_dex_count_ignores_string_typed_volume() -> None:
+    # A volume that arrives as a non-numeric string must not be miscounted as active.
+    provider = DexPaprika()
+    payload = {
+        "dexes": [
+            {"dex_id": "real", "volume_usd_24h": 5.0},
+            {"dex_id": "weird", "volume_usd_24h": "N/A"},
+        ]
+    }
+    with patch.object(provider._session, "get", return_value=_make_mock_resp(payload)):
+        rows = provider.fetch_rows("defi_dex_count", _TODAY, _TODAY)
+
+    assert rows == [{"date": _TODAY, "value": 1.0}]
+
+
+def test_dex_count_raises_if_page_is_full() -> None:
+    # A completely full page means the protocol set outgrew one page; refuse to
+    # silently under-report rather than capping the count.
+    provider = DexPaprika()
+    full_page = {
+        "dexes": [{"dex_id": f"d{i}", "volume_usd_24h": 1.0} for i in range(100)]
+    }
+    with patch.object(
+        provider._session, "get", return_value=_make_mock_resp(full_page)
+    ):
+        try:
+            provider.fetch_rows("defi_dex_count", _TODAY, _TODAY)
+            assert False, "Expected RuntimeError on a full page"
+        except RuntimeError as exc:
+            assert "page limit" in str(exc)
+
+
+def test_fetch_rows_empty_when_chain_absent() -> None:
+    provider = DexPaprika()
+    only_eth = [{"id": "ethereum", "volume_usd_24h": 1.0, "txns_24h": 1}]
+    with patch.object(provider._session, "get", return_value=_make_mock_resp(only_eth)):
+        assert provider.fetch_rows("defi_dex_volume", _TODAY, _TODAY) == []
+
+
+def test_fetch_rows_empty_when_field_is_null() -> None:
+    provider = DexPaprika()
+    null_field = [{"id": "solana", "volume_usd_24h": None, "txns_24h": 1}]
+    with patch.object(
+        provider._session, "get", return_value=_make_mock_resp(null_field)
+    ):
+        assert provider.fetch_rows("defi_dex_volume", _TODAY, _TODAY) == []
+
+
+def test_fetch_rows_empty_when_token_summary_missing() -> None:
+    provider = DexPaprika()
+    no_summary = {"id": "So111", "name": "Wrapped SOL"}  # no "summary" block
+    with patch.object(
+        provider._session, "get", return_value=_make_mock_resp(no_summary)
+    ):
+        assert provider.fetch_rows("overview_sol_price", _TODAY, _TODAY) == []
+
+
 def test_get_sol_price_returns_overview_metric() -> None:
     provider = DexPaprika()
-    sentinel_metric = object()
 
-    with (
-        patch.object(
-            provider._session, "get", return_value=_make_mock_resp(_SOL_TOKEN_RAW)
-        ),
-        patch.object(
-            Overview, "from_metric_type", return_value=sentinel_metric
-        ) as mock_factory,
+    with patch.object(
+        provider._session, "get", return_value=_make_mock_resp(_SOL_TOKEN_RAW)
     ):
         result = provider.get_metric("overview_sol_price", _TODAY, "solana")
 
-    assert result is sentinel_metric
-    mock_factory.assert_called_once()
-    assert mock_factory.call_args.kwargs["metric_type"] == OverviewMetricType.SOL_PRICE
-    assert mock_factory.call_args.kwargs["value"] == 68.42
+    # Real Overview model: proves the overview branch routes correctly and the
+    # SOL_PRICE metadata is wired up.
+    assert isinstance(result, Overview)
+    assert result.metric_type == OverviewMetricType.SOL_PRICE
+    assert result.value == 68.42
 
 
 def test_fetch_rows_returns_empty_when_today_out_of_range() -> None:

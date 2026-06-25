@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import math
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -97,9 +98,22 @@ class DexPaprika(BaseProvider):
         )
         adapter = HTTPAdapter(max_retries=retry)
         self._session.mount("https://", adapter)
-        self._session.mount("http://", adapter)
 
     # -- private helpers ----------------------------------------------------
+
+    @staticmethod
+    def _to_float(value: Any) -> Optional[float]:
+        """Coerce an API value to a finite float, or None if it can't be.
+
+        Guards against schema drift: a field arriving as a string, object, or
+        NaN/Inf yields None (treated as "missing") instead of raising or
+        silently poisoning a metric with a non-finite value.
+        """
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return None
+        return result if math.isfinite(result) else None
 
     def _get(self, endpoint: str, *, params: Optional[Dict[str, Any]] = None) -> Any:
         resp = self._session.get(
@@ -113,8 +127,7 @@ class DexPaprika(BaseProvider):
         networks = self._get("/networks")
         for network in networks if isinstance(networks, list) else []:
             if network.get("id") == self._CHAIN:
-                value = network.get(field)
-                return None if value is None else float(value)
+                return self._to_float(network.get(field))
         return None
 
     def _token_summary_field(self, endpoint: str, field: str) -> Optional[float]:
@@ -123,18 +136,32 @@ class DexPaprika(BaseProvider):
         summary = payload.get("summary") if isinstance(payload, dict) else None
         if not isinstance(summary, dict):
             return None
-        value = summary.get(field)
-        return None if value is None else float(value)
+        return self._to_float(summary.get(field))
 
     def _active_dex_count(self, endpoint: str) -> int:
         """Count DEXes on the chain with non-zero 24h volume.
 
-        The endpoint returns the full DEX list in one page (Solana has a small,
-        fixed set of protocols), so a single request suffices.
+        ``/networks/<chain>/dexes`` lists DEX *protocols* (Solana has ~9:
+        raydium, orca, meteora, pumpfun, ...), not pools, so the full set fits
+        in one page. We request ``_DEX_PAGE_LIMIT`` and refuse to silently cap:
+        if a completely full page comes back the protocol set has outgrown one
+        page and the count can no longer be trusted, so we raise rather than
+        under-report. (The endpoint's ``page`` param is a server-side no-op
+        today, so true pagination isn't available to walk.)
         """
         payload = self._get(endpoint, params={"limit": self._DEX_PAGE_LIMIT})
         dexes = payload.get("dexes", []) if isinstance(payload, dict) else []
-        return sum(1 for dex in dexes if (dex.get("volume_usd_24h") or 0) > 0)
+        if len(dexes) >= self._DEX_PAGE_LIMIT:
+            raise RuntimeError(
+                f"DEX list hit the page limit ({self._DEX_PAGE_LIMIT}); "
+                "count may be truncated and is no longer reliable."
+            )
+        count = 0
+        for dex in dexes:
+            volume = self._to_float(dex.get("volume_usd_24h"))
+            if volume is not None and volume > 0:
+                count += 1
+        return count
 
     # -- BaseProvider interface ---------------------------------------------
 
