@@ -7,6 +7,7 @@ import datetime
 import pytest
 
 from metrics.defi import Defi, DefiMetricType
+from metrics.overview import Overview, OverviewMetricType
 from providers.dexpaprika import DexPaprika
 
 _TODAY = datetime.date.today().isoformat()
@@ -43,3 +44,19 @@ def test_get_dex_count_live_api() -> None:
     assert metric.metric_type == DefiMetricType.DEX_COUNT
     assert metric.value >= 1
     assert metric.value == int(metric.value)
+
+
+@pytest.mark.integration
+def test_get_sol_price_live_api() -> None:
+    """SOL price for Solana should be a positive USD value."""
+    provider = DexPaprika()
+    metric = provider.get_metric(
+        metric="overview_sol_price",
+        date=_TODAY,
+        chain="solana",
+    )
+
+    assert metric is not None
+    assert isinstance(metric, Overview)
+    assert metric.metric_type == OverviewMetricType.SOL_PRICE
+    assert metric.value > 0

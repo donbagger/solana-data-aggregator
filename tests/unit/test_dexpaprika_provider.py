@@ -6,6 +6,7 @@ import datetime
 from unittest.mock import MagicMock, patch
 
 from metrics.defi import Defi, DefiMetricType
+from metrics.overview import Overview, OverviewMetricType
 from providers.dexpaprika import DexPaprika
 
 _TODAY = datetime.date.today().isoformat()
@@ -22,6 +23,12 @@ _DEXES_RAW = {
         {"dex_id": "dead-dex", "volume_usd_24h": 0},
     ],
     "page_info": {"limit": 100, "page": 1},
+}
+
+_SOL_TOKEN_RAW = {
+    "id": "So11111111111111111111111111111111111111112",
+    "name": "Wrapped SOL",
+    "summary": {"price_usd": 68.42, "liquidity_usd": 1_200_000_000.0},
 }
 
 
@@ -71,6 +78,26 @@ def test_fetch_rows_dex_count_counts_only_active() -> None:
 
     # 2 of 3 DEXes have non-zero 24h volume
     assert rows == [{"date": _TODAY, "value": 2.0}]
+
+
+def test_get_sol_price_returns_overview_metric() -> None:
+    provider = DexPaprika()
+    sentinel_metric = object()
+
+    with (
+        patch.object(
+            provider._session, "get", return_value=_make_mock_resp(_SOL_TOKEN_RAW)
+        ),
+        patch.object(
+            Overview, "from_metric_type", return_value=sentinel_metric
+        ) as mock_factory,
+    ):
+        result = provider.get_metric("overview_sol_price", _TODAY, "solana")
+
+    assert result is sentinel_metric
+    mock_factory.assert_called_once()
+    assert mock_factory.call_args.kwargs["metric_type"] == OverviewMetricType.SOL_PRICE
+    assert mock_factory.call_args.kwargs["value"] == 68.42
 
 
 def test_fetch_rows_returns_empty_when_today_out_of_range() -> None:
